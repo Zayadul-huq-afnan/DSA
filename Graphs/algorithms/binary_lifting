@@ -1,0 +1,133 @@
+#include<bits/stdc++.h>
+
+using namespace std;
+
+using ll = int;
+
+const int nmax= 2e5+10;
+
+vector<int>adj[nmax];
+
+// 2d array represents 2^j th ancestor of a node. [nmax] represent the node , [20] represent 2^j th ancestor
+// Dont need more than 20 as 2^20 is a huge number as we wont have nodes more than 2^20
+ll ancestor[nmax][20] ;
+
+void binary_lifting(ll node, ll parent)
+{
+    for(ll i= 0 ; i<20 ; i++)
+    {
+        //initializing all the 2^j th ancestor as -1.
+        ancestor[node][i]=-1;
+    }
+
+    //if the parent is -1. then no need the calculate.
+    // basically for root node;
+    if(parent!=-1)
+    {
+        //the first ancestor of a node is its parent itself.
+        ancestor[node][0]=parent;
+
+        //now compute 2^1 th to 2^19 th ancestor.
+        for(ll i=1 ; i<20 ; i++)
+        {
+            // recurrence--> ancestor[node][i]= ancestor[ancestor[node][i-1]][i-1];
+
+            // first find out 2^i-1 th ancestor of "node";
+            ll v = ancestor[node][i-1];
+
+           //now check if v exist or not;
+
+           if(v==-1)
+           {
+               break;
+           }
+
+            ancestor[node][i]=ancestor[v][i-1];
+
+        }
+    }
+
+    for(auto x:adj[node])
+    {
+        //now go one of the child of "node".
+        //here we mainly doing dfs.
+
+        //if(x==parent)continue; // eta sabbir bhai dise, kn dise jani na. na dileo kaj kore.
+        binary_lifting(x,node);
+    }
+}
+
+ll getAncestor(ll node , ll k)
+{
+    //ll ret;
+    for(ll i=0 ; i<20 ; i++)
+    {
+        //now think k as its decimal form.
+        //  suppose we want to find 6th ancestor of node.
+        // we can represent 6 as 110 in binary.
+        // 2^2 + 2^1 =6.
+        // so check the bits of k.
+
+        if((k&(1<<i))!=0)
+        {
+            node=ancestor[node][i];
+
+            //check if we have cross the root.
+
+            if(node==-1)
+            {
+                // means the kth ancestor does not exist.
+                // like the tree is 1-2-3. we want to find 10th ancestor of 3.
+                return -1;
+            }
+        }
+
+
+
+    }
+     return node;
+}
+
+
+
+
+
+
+int main()
+{
+
+    ll n,q;
+    cin>>n>>q;
+
+    //declaring 1 as root. root may vary.
+    ll root= 1;
+
+    for(ll i=2 ; i<=n ; i++)
+    {
+        //takig input of parent node for
+        // node 2,3,4....n.
+        ll parent;
+        cin>>parent;
+
+        //pushing the node into their parent nodes adj list.
+        adj[parent].push_back(i);
+    }
+
+    // here 1 is the root.
+    // 1 has no parent , so (-1).
+    binary_lifting(root,-1);
+
+    //answer the queries
+
+    for(ll i=0 ; i<q ; i++)
+    {
+        ll n,k;
+        cin>>n>>k;
+
+        ll ret = getAncestor(n,k);
+
+        cout<<ret<<"\n";
+    }
+
+    return 0;
+}
