@@ -1,0 +1,468 @@
+import os
+import sys
+import subprocess
+import urllib.request
+import zipfile
+import shutil
+from pathlib import Path
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox
+import platform
+import stat
+
+def is_windows():
+    return platform.system() == "Windows"
+
+def install_pywin32_if_missing():
+    if not is_windows():
+        return
+    try:
+        import win32com
+    except ImportError:
+        print("[*] pywin32 not found. Installing...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pywin32"])
+        print("[+] pywin32 installed successfully.")
+
+def run(cmd, cwd=None):
+    """Run command with platform-appropriate settings"""
+    print(f"[RUN] {cmd}")
+    if isinstance(cmd, str) and not is_windows():
+        cmd = cmd.split()  # On Linux, better to pass as list
+    subprocess.run(cmd, shell=is_windows(), check=True, cwd=cwd)
+
+def find_executable(base_path, base_name):
+    """
+    Find the executable file with platform-specific extensions
+    """
+    extensions = [".exe", ".bat", ".cmd", ""] if is_windows() else ["", ".sh"]
+    for ext in extensions:
+        path = base_path / (base_name + ext)
+        if path.is_file():
+            return str(path)
+    raise FileNotFoundError(f"Could not find {base_name} with extensions {extensions} in {base_path}")
+
+def get_sdk_root():
+    """Get appropriate SDK root path for the platform"""
+    if is_windows():
+        return Path.home() / "AppData" / "Local" / "Android" / "Sdk"
+    else:
+        # Standard Linux location or allow override with ANDROID_HOME
+        return Path(os.environ.get("ANDROID_HOME", str(Path.home() / "Android" / "Sdk")))
+
+# Config
+sdk_root = get_sdk_root()
+cmdline_tools_version = "10406996_latest"
+
+# Different download URL for Linux vs Windows
+if is_windows():
+    cmdline_tools_zip_url = f"https://dl.google.com/android/repository/commandlinetools-win-{cmdline_tools_version}.zip"
+else:
+    cmdline_tools_zip_url = f"https://dl.google.com/android/repository/commandlinetools-linux-{cmdline_tools_version}.zip"
+
+cmdline_zip_path = sdk_root / "cmdline-tools.zip"
+cmdline_tools_dir = sdk_root / "cmdline-tools"
+latest_dir = cmdline_tools_dir / "latest"
+
+def ensure_dirs():
+    print(f"[*] Ensuring directory exists: {latest_dir}")
+    latest_dir.mkdir(parents=True, exist_ok=True)
+
+def download_cmdline_tools():
+    if cmdline_zip_path.exists():
+        print("[+] Command line tools archive already downloaded.")
+        return
+    
+    print("[*] Downloading Android Command Line Tools...")
+    try:
+        urllib.request.urlretrieve(cmdline_tools_zip_url, cmdline_zip_path)
+        print("[+] Download complete.")
+    except Exception as e:
+        print(f"[!] Download failed: {e}")
+        if not is_windows():
+            print("You can try manually downloading with:")
+            print(f"wget {cmdline_tools_zip_url} -O {cmdline_zip_path}")
+        sys.exit(1)
+
+def extract_cmdline_tools():
+    if (latest_dir / "bin" / "sdkmanager").exists() or (latest_dir / "bin" / "sdkmanager.bat").exists():
+        print("[+] Command line tools already extracted.")
+        if cmdline_zip_path.exists():
+            cmdline_zip_path.unlink()
+        return
+
+    print("[*] Extracting command line tools...")
+    try:
+        with zipfile.ZipFile(cmdline_zip_path, 'r') as zip_ref:
+            zip_ref.extractall(latest_dir)
+
+        inner_path = latest_dir / "cmdline-tools"
+        if inner_path.is_dir():
+            for item in inner_path.iterdir():
+                shutil.move(str(item), latest_dir)
+            shutil.rmtree(inner_path)
+
+        if cmdline_zip_path.exists():
+            cmdline_zip_path.unlink()
+        
+        # Make binaries executable on Linux
+        if not is_windows():
+            bin_dir = latest_dir / "bin"
+            for tool in bin_dir.glob("*"):
+                if tool.is_file():
+                    tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+        
+        print("[+] Extraction complete.")
+    except Exception as e:
+        print(f"[!] Extraction failed: {e}")
+        sys.exit(1)
+
+def set_env_vars():
+    print("[*] Setting environment variables...")
+    
+    # Set ANDROID_HOME and update PATH
+    env_update = {
+        "ANDROID_HOME": str(sdk_root),
+        "PATH": [
+            str(sdk_root / "platform-tools"),
+            str(sdk_root / "emulator"),
+            str(latest_dir / "bin")
+        ]
+    }
+    
+    if is_windows():
+        try:
+            import winreg
+            # Set ANDROID_HOME system variable
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                               r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                               0, winreg.KEY_ALL_ACCESS) as key:
+                winreg.SetValueEx(key, "ANDROID_HOME", 0, winreg.REG_EXPAND_SZ, str(sdk_root))
+                print("[+] ANDROID_HOME set in Windows registry")
+
+            # Update PATH system variable
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                               r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                               0, winreg.KEY_ALL_ACCESS) as key:
+                current_path, _ = winreg.QueryValueEx(key, "Path")
+                path_parts = current_path.split(";")
+                updated = False
+
+                for p in env_update["PATH"]:
+                    if p not in path_parts:
+                        path_parts.append(p)
+                        updated = True
+
+                if updated:
+                    new_path = ";".join(path_parts)
+                    winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+                    print("[+] PATH updated in Windows registry")
+        except Exception as e:
+            print(f"[!] Failed to update Windows registry: {e}")
+            print("You may need to run this script as administrator")
+    else:
+        # Linux/Mac - update shell configuration files
+        shell_configs = [
+            Path.home() / ".bashrc",
+            Path.home() / ".zshrc",
+            Path.home() / ".profile"
+        ]
+        
+        export_lines = [
+            f"export ANDROID_HOME={sdk_root}",
+            f"export PATH={':'.join(env_update['PATH'])}:$PATH"
+        ]
+        
+        updated = False
+        for config_file in shell_configs:
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r+') as f:
+                        content = f.read()
+                        needs_update = any(export not in content for export in export_lines)
+                        
+                        if needs_update:
+                            f.write("\n# Android SDK paths\n" + "\n".join(export_lines) + "\n")
+                            print(f"[+] Updated {config_file} with Android paths")
+                            updated = True
+                except Exception as e:
+                    print(f"[!] Failed to update {config_file}: {e}")
+        
+        if updated:
+            print("[!] Please restart your terminal or run 'source ~/.bashrc' (or your shell config)")
+        else:
+            print("[+] Environment variables already set")
+
+def install_sdk_components(sdkmanager_path, system_image, platform_version):
+    print("[*] Accepting licenses...")
+    run([sdkmanager_path, f"--sdk_root={sdk_root}", "--licenses"])
+
+    print("[*] Installing platform-tools, emulator, platform SDK, and system image...")
+    run([sdkmanager_path, f"--sdk_root={sdk_root}", "platform-tools", "emulator", f"platforms;{platform_version}", system_image])
+
+def create_avd(system_image, avd_name):
+    """Create Android Virtual Device"""
+    avdmanager_path = find_executable(latest_dir / "bin", "avdmanager")
+    sdkmanager_path = find_executable(latest_dir / "bin", "sdkmanager")
+    
+    if not avdmanager_path:
+        print(f"[!] avdmanager not found at {latest_dir / 'bin'}")
+        return 
+    
+    # Install the specific system image
+    run([sdkmanager_path, system_image])
+    
+    # Create the AVD
+    device = "pixel"
+    run([avdmanager_path, "create", "avd", "-n", avd_name, "-k", system_image, "--device", device])
+
+def get_available_system_images():
+    """Extracts available system images from `sdkmanager --list` output."""
+    sdkmanager_path = find_executable(latest_dir / "bin", "sdkmanager")
+    if not sdkmanager_path:
+        return []
+
+    result = subprocess.run([sdkmanager_path, "--list"], capture_output=True, text=True)
+    output = result.stdout
+    pattern = r'(system-images;[^\s]+)'
+    matches = re.findall(pattern, output)
+    return matches
+
+def get_installed_emulators():
+    """Returns list of installed emulators"""
+    emulator_path = find_executable(sdk_root / "emulator", "emulator")
+    if not emulator_path:
+        return []
+    
+    result = subprocess.run([emulator_path, "-list-avds"], capture_output=True, text=True)
+    return result.stdout.strip().splitlines()
+
+def run_emulator(avd_name):
+    """Launch the specified emulator"""
+    emulator_path = find_executable(sdk_root / "emulator", "emulator")
+    if not emulator_path:
+        print("[!] Emulator not found")
+        return
+    
+    if is_windows():
+        subprocess.Popen([emulator_path, "-avd", avd_name])
+    else:
+        # Linux - run in background and detach
+        cmd = f"nohup {emulator_path} -avd {avd_name} >/dev/null 2>&1 &"
+        os.system(cmd)
+    print(f"[+] Emulator {avd_name} launched")
+
+def create_desktop_shortcut(avd_name):
+    if not is_windows():
+        print("[*] Creating Linux desktop shortcut...")
+        desktop_path = Path.home() / "Desktop"
+        if not desktop_path.exists():
+            desktop_path = Path.home() / "Desktop"  # Try alternative
+            if not desktop_path.exists():
+                print("[!] Could not find desktop directory")
+                return
+        
+        shortcut_path = desktop_path / f"Launch_{avd_name}.desktop"
+        emulator_path = find_executable(sdk_root / "emulator", "emulator")
+        if not emulator_path:
+            print("[!] Emulator not found")
+            return
+        
+        content = f"""[Desktop Entry]
+                        Version=1.0
+                        Type=Application
+                        Terminal=false
+                        Exec={emulator_path} -avd {avd_name}
+                        Name=Launch {avd_name}
+                        Icon=android
+                        """
+        try:
+            with open(shortcut_path, "w") as f:
+                f.write(content)
+            
+            # Make executable
+            shortcut_path.chmod(shortcut_path.stat().st_mode | stat.S_IEXEC)
+            print(f"[+] Created desktop shortcut at {shortcut_path}")
+        except Exception as e:
+            print(f"[!] Failed to create shortcut: {e}")
+        return
+        
+    # Windows shortcut creation
+    install_pywin32_if_missing()
+    try:
+        import pythoncom
+        from win32com.shell import shell, shellcon
+        from win32com.client import Dispatch
+    except ImportError:
+        print("[!] pywin32 import failed. Skipping shortcut creation.")
+        return
+
+    desktop_path = shell.SHGetFolderPath(0, shellcon.CSIDL_DESKTOP, None, 0)
+    shortcut_path = os.path.join(desktop_path, f"Launch {avd_name}.lnk")
+
+    target = sdk_root / "emulator" / "emulator.exe"
+    if not target.exists():
+        print(f"[!] Emulator executable not found at {target}")
+        return
+
+    arguments = f"-avd {avd_name}"
+    working_dir = target.parent
+    icon = str(target)
+
+    try:
+        shell_obj = Dispatch('WScript.Shell')
+        shortcut = shell_obj.CreateShortcut(shortcut_path)
+        shortcut.TargetPath = str(target)
+        shortcut.Arguments = arguments
+        shortcut.WorkingDirectory = str(working_dir)
+        shortcut.IconLocation = icon
+        shortcut.Save()
+        print(f"[+] Desktop shortcut created at: {shortcut_path}")
+    except Exception as e:
+        print(f"[!] Failed to create shortcut: {e}")
+
+def create_avd_name(system_image):
+    parts = system_image.split(";")
+    android_version = parts[1].replace("android-", "API_")
+    return f"Pixel{android_version}"
+
+def check_dependencies():
+    """Check for required dependencies"""
+    missing = []
+    
+    # Platform-agnostic dependencies
+    if not shutil.which("zip"):
+        missing.append("zip")
+    
+    # Platform-specific dependencies
+    if is_windows():
+        pass  # Windows doesn't need additional tools
+    else:
+        if not shutil.which("unzip"):
+            missing.append("unzip")
+        if not shutil.which("java"):
+            missing.append("java")
+    
+    if missing:
+        print(f"[!] Missing required tools: {', '.join(missing)}")
+        if not is_windows():
+            print("On Ubuntu/Debian, try: sudo apt install unzip openjdk-11-jdk")
+        return False
+    return True
+
+def prompt_gui():
+    def on_install():
+        selected_indices = listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("No Selection", "Please select a system image to install.")
+            return
+        selected_image = listbox.get(selected_indices[0])
+        root.selected_image = selected_image  # Same as original
+        root.destroy()
+
+    root = tk.Tk()
+    root.title("System Image Selector")
+    
+    # Larger window
+    root.geometry("750x550")
+    
+    # Modern fonts
+    custom_font = ("Segoe UI", 12)  # Cleaner than Arial
+    button_font = ("Segoe UI", 12, "bold")
+    
+    # Main frame for padding
+    main_frame = tk.Frame(root, padx=20, pady=20)
+    main_frame.pack(fill=tk.BOTH, expand=True)
+    
+    # Listbox with scrollbar
+    list_frame = tk.Frame(main_frame)
+    list_frame.pack(fill=tk.BOTH, expand=True)
+    
+    scrollbar = tk.Scrollbar(list_frame)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    listbox = tk.Listbox(
+        list_frame,
+        yscrollcommand=scrollbar.set,
+        font=custom_font,
+        height=15,
+        width=70,
+        bg="white",
+        selectbackground="#0066CC"  # Blue selection
+    )
+    listbox.pack(fill=tk.BOTH, expand=True)
+    scrollbar.config(command=listbox.yview)
+    
+    # Populate list (original logic)
+    images = get_available_system_images()
+    if not images:
+        messagebox.showerror("Error", "No system images found.")
+        root.destroy()
+        return None
+    
+    for img in images:
+        listbox.insert(tk.END, img)
+    
+    # Styled install button
+    install_button = tk.Button(
+        main_frame,
+        text="Install",
+        command=on_install,
+        font=button_font,
+        bg="#4CAF50",  # Green
+        fg="white",
+        padx=20,
+        pady=5,
+        relief=tk.FLAT,
+        borderwidth=0
+    )
+    install_button.pack(pady=15)
+    
+    root.mainloop()
+    
+    # Preserve original return logic
+    return getattr(root, "selected_image", None)
+
+
+def main():
+    print("== Android Emulator Manager ==")
+    print(f"Running on {platform.system()}")
+
+    # if not check_dependencies():
+    #     sys.exit(1)
+
+    ensure_dirs()
+    download_cmdline_tools()
+    extract_cmdline_tools()
+    set_env_vars()
+
+    action = prompt_gui()
+    if not action:
+        print("[!] No action selected. Exiting.")
+        return
+
+    if action.startswith("RUN_"):
+        avd_name = action[4:]
+        run_emulator(avd_name)
+    else:
+        system_image = action
+        avd_name = create_avd_name(system_image)
+        platform_version = system_image.split(";")[1]
+        
+        sdkmanager_path = find_executable(latest_dir / "bin", "sdkmanager")
+        if not sdkmanager_path:
+            print("[!] Could not find sdkmanager")
+            return
+            
+        install_sdk_components(sdkmanager_path, system_image, platform_version)
+        create_avd(system_image, avd_name)
+        create_desktop_shortcut(avd_name)
+        
+        print("\n✅ Setup complete!")
+        print(f"➡️  To launch the emulator manually, run:")
+        print(f"    {sdk_root}/emulator/emulator -avd {avd_name}")
+        if is_windows():
+            print("➡️  Or double-click the desktop shortcut")
+
+if __name__ == "__main__":
+    main()
